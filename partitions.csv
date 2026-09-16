@@ -1,5 +1,6 @@
-# SFES spike: the ROM is embedded in the app for now, so the app partition is big.
+# SFES flash layout (16 MB). roms = image packed from roms/ by tools/pack_roms.py.
 # Name,    Type, SubType, Offset,   Size,     Flags
 nvs,       data, nvs,     0x9000,   0x6000,
 phy_init,  data, phy,     0xf000,   0x1000,
-factory,   app,  factory, 0x10000,  0x400000,
+factory,   app,  factory, 0x10000,  0x200000,
+roms,      data, 0x40,    0x210000, 0xDE0000,

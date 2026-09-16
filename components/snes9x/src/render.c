@@ -27,12 +27,12 @@ void render_init(void)
     rlog_emu_state(&tc, &tcd, &fps);
     render_vram = heap_caps_malloc(0x10000, MALLOC_CAP_SPIRAM);
     Memory.VRAM = render_vram;
-    Memory.FillRAM = heap_caps_calloc(0x2200, 1, MALLOC_CAP_INTERNAL);
+    Memory.FillRAM = heap_caps_calloc(0x2200, 1, MALLOC_CAP_SPIRAM);   /* only 64 bytes of it are read */
     Memory.ROMFramesPerSecond = fps;
     /* the emulator side no longer uses its tile cache; take it over */
     IPPU.TileCache = tc;
     IPPU.TileCached = tcd;
-    IPPU.ScreenColors = heap_caps_calloc(256 * 9, sizeof(uint16_t), MALLOC_CAP_INTERNAL);
+    IPPU.ScreenColors = heap_caps_calloc(256 * 9, sizeof(uint16_t), MALLOC_CAP_SPIRAM);   /* internal RAM is spoken for */
     IPPU.DirectColors = IPPU.ScreenColors + 256;
     assert(render_vram && Memory.FillRAM && IPPU.ScreenColors);
     for (int p = 0; p < 8; p++)   /* constant table (S9xFixColourBrightness ignores brightness for it) */

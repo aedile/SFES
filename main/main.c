@@ -1,6 +1,7 @@
 /*
  * SFES spike: does snes9x run on the Waveshare ESP32-S3-Touch-LCD-1.85, and how fast?
- * One ROM embedded in the app, copied to PSRAM. Sound through the PCM5101; the blocking I2S
+ * ROMs live in the 'roms' partition (tools/pack_roms.py); the chosen one is copied to PSRAM.
+ * BOOT button or 'n' on the serial console reboots into the next ROM. Sound through the PCM5101; the blocking I2S
  * write paces emulation to the DAC clock, and a frame that ran long skips drawing the next one.
  * No BLE yet. Keys typed into the serial monitor act as the pad:
  *   w/a/s/d = d-pad, j = B, k = A, u = Y, i = X, o = L, p = R, q = Start, e = Select
@@ -22,8 +23,35 @@
 static const char *TAG = "SFES";
 extern uint32_t s9x_render_cycles;
 
-extern const uint8_t rom_start[] asm("_binary_rom_sfc_start");
-extern const uint8_t rom_end[]   asm("_binary_rom_sfc_end");
+#include "esp_partition.h"
+#include "esp_system.h"
+#include "driver/gpio.h"
+#define PIN_BOOT 0
+static RTC_NOINIT_ATTR uint32_t rom_index;   /* survives the reboot that switches ROM */
+static volatile bool want_next_rom;
+static void serial_push(uint8_t c);
+
+typedef struct __attribute__((packed)) { char name[48]; uint32_t off, size; } rom_entry_t;
+
+/* copies ROM number rom_index (wrapping) from the roms partition into Memory.ROM; returns its size */
+static size_t rom_load(char *name, size_t namelen)
+{
+    const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, "roms");
+    assert(p);
+    struct { char magic[4]; uint32_t count; } head;
+    ESP_ERROR_CHECK(esp_partition_read(p, 0, &head, sizeof head));
+    assert(memcmp(head.magic, "SFES", 4) == 0 && head.count > 0);
+    if (rom_index >= head.count) rom_index = 0;
+    rom_entry_t e;
+    ESP_ERROR_CHECK(esp_partition_read(p, 8 + rom_index * sizeof e, &e, sizeof e));
+    snprintf(name, namelen, "%.48s", e.name);
+    ESP_LOGI(TAG, "ROM %lu/%lu: %s, %lu bytes", rom_index + 1, head.count, name, e.size);
+    Memory.ROM_AllocSize = e.size;
+    Memory.ROM = heap_caps_malloc(e.size + 0x10000 + 0x200, MALLOC_CAP_SPIRAM);
+    assert(Memory.ROM);
+    ESP_ERROR_CHECK(esp_partition_read(p, e.off, Memory.ROM, e.size));
+    return e.size;
+}
 
 #ifndef MEM_LAYOUT
 #define MEM_LAYOUT 1  /* bench knob: 0 everything in PSRAM, 1 screen+zbuffer internal, 2 WRAM+VRAM+APU RAM internal */
@@ -40,20 +68,22 @@ extern const uint8_t rom_end[]   asm("_binary_rom_sfc_end");
 #define SAMPLE_RATE   32000
 #define VOLUME_SHIFT  2   /* ponytail: software volume, samples >> this; a real volume setting later */
 
-/* ---- pad: serial keys held for 120 ms after each keystroke ---- */
+/* ---- pad: serial keys held for 120 ms after each keystroke (read by the watchdog timer) ---- */
+static const char keys[] = "wsadjkuiopqe";
+static const uint32_t bits[] = { SNES_UP_MASK, SNES_DOWN_MASK, SNES_LEFT_MASK, SNES_RIGHT_MASK,
+    SNES_B_MASK, SNES_A_MASK, SNES_Y_MASK, SNES_X_MASK, SNES_TL_MASK, SNES_TR_MASK,
+    SNES_START_MASK, SNES_SELECT_MASK };
+static volatile int64_t held_until[sizeof keys - 1];
+
+static void serial_push(uint8_t c)
+{
+    const char *k = memchr(keys, c, sizeof keys - 1);
+    if (k) held_until[k - keys] = esp_timer_get_time() + 120000;
+}
+
 static uint32_t serial_pad(void)
 {
-    static const char keys[] = "wsadjkuiopqe";
-    static const uint32_t bits[] = { SNES_UP_MASK, SNES_DOWN_MASK, SNES_LEFT_MASK, SNES_RIGHT_MASK,
-        SNES_B_MASK, SNES_A_MASK, SNES_Y_MASK, SNES_X_MASK, SNES_TL_MASK, SNES_TR_MASK,
-        SNES_START_MASK, SNES_SELECT_MASK };
-    static int64_t held_until[sizeof keys - 1];
     int64_t now = esp_timer_get_time();
-    uint8_t c;
-    while (usb_serial_jtag_read_bytes(&c, 1, 0) == 1) {
-        const char *k = memchr(keys, c, sizeof keys - 1);
-        if (k) held_until[k - keys] = now + 120000;
-    }
     uint32_t m = 0;
     for (size_t i = 0; i < sizeof keys - 1; i++) if (held_until[i] > now) m |= bits[i];
     return m;
@@ -78,6 +108,23 @@ bool S9xReadMousePosition(int32_t w, int32_t *x, int32_t *y, uint32_t *b) { retu
 bool S9xReadSuperScopePosition(int32_t *x, int32_t *y, uint32_t *b) { return false; }
 bool JustifierOffscreen(void) { return true; }
 void JustifierButtons(uint32_t *j) {}
+
+static volatile uint32_t frames_total;
+static void watchdog(void *arg)
+{
+    static int ticks; static uint32_t last;
+    uint8_t c;
+    while (usb_serial_jtag_read_bytes(&c, 1, 0) == 1) {
+        if (c == 'n') want_next_rom = true;
+        else serial_push(c);
+    }
+    if (!gpio_get_level(PIN_BOOT)) want_next_rom = true;
+    if (want_next_rom) { ESP_LOGI(TAG, "next ROM"); rom_index++; esp_restart(); }
+    if (++ticks % 50 == 0) {
+        if (frames_total == last) ESP_LOGW(TAG, "emulator stuck: %lu frames total, S9xMainLoop not returning", frames_total);
+        last = frames_total;
+    }
+}
 
 static void log_heap(const char *when)
 {
@@ -114,7 +161,7 @@ static void emu_task(void *arg)
             while (esp_timer_get_time() < next) ;
         }
         int64_t t4 = esp_timer_get_time();
-        emu_us += t1 - t0; push_us += t2 - t1; mix_us += t3 - t2; audio_wait_us += t4 - t3; frames++;
+        frames_total++; emu_us += t1 - t0; push_us += t2 - t1; mix_us += t3 - t2; audio_wait_us += t4 - t3; frames++;
         if (frames == 300) {   /* fixed frame count, so runs line up on the same moment of the game */
             float sec = (t4 - t_report) / 1e6f;
             ESP_LOGI(TAG, "%.1f fps emulated, %.1f rendered (%lu dropped, %.1f bands/frame) | emu core: %5lld us/frame, mix %4lld, audio wait %4lld | render core: %5lu us/frame (draw %5lu, dma wait %4lu) | %s",
@@ -146,13 +193,12 @@ void app_main(void)
     Settings.DisableSoundEcho = false;
     Settings.InterpolatedSound = false;   /* cheaper; turn on if there is CPU to spare */
 
+    gpio_config_t boot = { .pin_bit_mask = 1ULL << PIN_BOOT, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
+    gpio_config(&boot);
+    if (esp_reset_reason() != ESP_RST_SW) rom_index = 0;   /* RTC memory is garbage after power-on */
     /* ROM: flash -> PSRAM. S9xInitMemory keeps a ROM buffer it finds already set. */
-    size_t rom_len = rom_end - rom_start;
-    Memory.ROM_AllocSize = rom_len;
-    Memory.ROM = heap_caps_malloc(rom_len + 0x10000 + 0x200, MALLOC_CAP_SPIRAM);
-    assert(Memory.ROM);
-    memcpy(Memory.ROM, rom_start, rom_len);
-    ESP_LOGI(TAG, "ROM %u bytes copied to PSRAM", (unsigned)rom_len);
+    char rom_name[49];
+    rom_load(rom_name, sizeof rom_name);
 
     assert(S9xInitDisplay());
     assert(S9xInitMemory());
@@ -177,6 +223,13 @@ void app_main(void)
 
     rlog_init();
     render_init();
-    xTaskCreatePinnedToCore(render_task, "render", 12288, NULL, 4, (TaskHandle_t *)&render_task_handle, 0);
-    xTaskCreatePinnedToCore(emu_task, "emu", 16384, NULL, 5, NULL, 1);
+    log_heap("before tasks");
+    assert(xTaskCreatePinnedToCore(render_task, "render", 12288, NULL, 4, (TaskHandle_t *)&render_task_handle, 0) == pdPASS);
+    assert(xTaskCreatePinnedToCore(emu_task, "emu", 16384, NULL, 5, NULL, 1) == pdPASS);
+    /* independent of the emulator: BOOT button / 'n' switch ROMs even if a game has locked up, and
+     * a progress line every 5 s says whether S9xMainLoop is returning at all */
+    esp_timer_create_args_t w = { .callback = watchdog, .name = "watchdog" };
+    esp_timer_handle_t wh;
+    ESP_ERROR_CHECK(esp_timer_create(&w, &wh));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(wh, 100000));
 }

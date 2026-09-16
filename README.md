@@ -5,9 +5,10 @@ ESP32-S3 at 240 MHz, 8 MB PSRAM, 16 MB flash, a 360x360 ST77916 panel on QSPI,
 a PCM5101 DAC with a speaker, a micro SD slot, touch, IMU and a battery. The
 SNES sibling of [NESTOR](https://github.com/aedile/NESTOR), the NES medal.
 
-*Status: a working spike.* One ROM embedded in the app runs with picture and
-(optionally) sound; keys typed into the serial monitor act as the pad. No
-controller, no picker, no SD card, no saves yet. The numbers so far are in
+*Status: a working spike.* Every ROM in `roms/` is packed into a flash
+partition; the BOOT button (or `n` on the serial console) reboots into the
+next one. Picture and sound work; keys typed into the serial monitor act as
+the pad. No controller, no picker, no SD card, no saves yet. Numbers are in
 "Performance" below.
 
 ## Building
@@ -16,20 +17,19 @@ Everything runs in Espressif's Docker image; the host only needs `esptool`
 (Homebrew) to flash.
 
 ```sh
-cp your/game.zip roms/           # .zip with an .sfc/.smc inside, or a bare .sfc (roms/ is ignored by git)
-./build.sh                       # idf.py build in espressif/idf:v5.3.4 -> build_docker/
-./flash.sh [port]                # bootloader, partition table, app
-tools/monitor.py [secs]          # reset and print the serial log
+cp your/games/*.zip roms/        # .zip with an .sfc/.smc inside, or bare .sfc/.smc (roms/ is ignored by git)
+./build.sh                       # idf.py build in espressif/idf:v5.3.4 -> build_docker/ (packs roms/ too)
+./flash.sh [port]                # bootloader, partition table, app, ROM image
+tools/monitor.py [secs] [port] [noreset]   # print the serial log (resets the board unless told not to)
+tools/keys.py <keys>             # type pad keys or 'n' (next ROM) into the console
 ```
 
-The default ROM is `Legend of Zelda, The_ A Link to the Past.zip`; pick another
-with `./build.sh -DROM="name.zip" build`. Build-time knobs (CMake cache
-variables, so they stick until changed):
+Build-time knobs (CMake cache variables, so they stick until changed):
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `SOUND` | 0 | 1 plays through the PCM5101; the blocking I2S write then paces emulation |
-| `FRAMESKIP` | -1 | -1 auto (a frame that overruns drops the next draw), else fixed skip count |
+| `FRAMESKIP` | 0 | frames left out of the render log between logged ones (the render core drops what it cannot keep up with anyway) |
 | `MEM_LAYOUT` | 1 | 0 all PSRAM, 1 framebuffer + depth buffer in internal RAM, 2 CPU RAMs internal (hangs the board, do not use) |
 | `APU_OFF` | 0 | 1 skips SPC700 emulation, for measuring only |
 
@@ -55,28 +55,46 @@ reads ID register 04h and picks (00 7F 7F 7F = the driver default, 00 02 7F 7F
 The SNES 256x224 frame is pushed 1:1, centred, in 16-row strips that are
 byte-swapped into DMA buffers while the previous strip is on the wire.
 
+## Two cores
+
+Emulation (65816, SPC700, DSP mixing) runs on core 1; rendering on core 0.
+snes9x renders lazily, in bands of scanlines whenever a PPU register write
+changes what the next lines would look like. Here the emulator side
+(`rlog.c`) records a snapshot of the PPU state, OAM, CGRAM and palette at each
+of those points, plus the per-line scroll data, into a log; VRAM writes mark
+16-byte blocks that are copied across at hand-off. The render side (`gfx.c`,
+`tile.c`, `clip.c`, `render.c`) is compiled with its own copies of the PPU
+globals (`-DPPU=render_PPU` and friends), replays the log a frame behind, and
+pushes finished strips between bands. Frames the render core cannot take are
+dropped. The emulator core is therefore never waiting on the panel or the
+renderer, and audio stays continuous.
+
 ## Performance
 
-Zelda: A Link to the Past attract sequence, every 300 emulated frames, no sound:
+Emulator core at a paced 60 Hz, no sound, per 300 frames:
 
-| Segment | Emulation per frame | Push per drawn frame |
-|---|---|---|
-| Title | 9.9 ms | 4.3 ms |
-| Intro | 12.1 ms | 4.3 ms |
-| Attract play | 14.7 to 18.3 ms | 4.3 ms |
+| Game | Emulator core per frame | Render core per frame | Rendered fps |
+|---|---|---|---|
+| Zelda: A Link to the Past, title / attract play | 7.5 ms | 8.7 / 26 ms | 58 / 30 |
+| Donkey Kong Country, intro / attract | 4 to 6 ms (+2 ms mixing with sound) | 12 / 30 ms | 60 / 30 |
+| Street Fighter II | 4.6 ms | 13 to 18 ms | 33 to 46 |
+| Super Mario Kart | 5 ms | 9 to 17 ms | 41 to 60 |
+| Super Mario World, title / play | 6 to 8 ms | 9 / 23 ms | 60 / 30 |
 
-Budget is 16.7 ms. Title and intro run at full speed; gameplay is at 70 to 90
-percent with frameskip. Full history and what was tried: see the commit log.
+Game logic and sound run at full speed in every case; what varies is how many
+of those frames the panel gets. Star Fox needs the SuperFX chip, which
+Snes9x 2005 does not emulate.
 
 ## Layout
 
 ```
-main/            app: ROM load, emulator loop, serial pad, profiling
+main/            app: ROM load from the roms partition, emulator loop, serial pad, watchdog, profiling
 components/
   display/       ST77916 QSPI driver (Espressif, via Waveshare's demo) + strip push + TCA9554 reset
   audio/         PCM5101 on I2S
-  snes9x/        Snes9x 2005 as carried in retro-go
-tools/           ROM extractor, serial monitor, bench script
+  snes9x/        Snes9x 2005 as carried in retro-go, split into emulator and render sides (rlog.c, render.c)
+tools/           ROM packer, serial monitor, key sender, bench script
+partitions.csv   nvs, phy, app 2 MB, roms 13.9 MB
 ```
 
 ## Licensing
