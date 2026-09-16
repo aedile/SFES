@@ -24,6 +24,11 @@ Modifications for this port (September 2026):
 | File | Change |
 |---|---|
 | `src/port.h` | added `stdio.h`, `stdlib.h`, `stdint.h` includes (retro-go supplied them through `rg_system.h`) |
+| `src/ppu.h` | `FLUSH_REDRAW` logs a band on the emulator side (`rlog_flush`) instead of rendering; VRAM writes mark `sfes_vram_dirty` instead of the tile cache |
+| `src/cpuexec.c` | frame start/end and per-line hooks call `rlog_*` |
+| `src/gfx.c` | `S9xSetLineData` (render side loads the logged per-line data); `S9xUpdateScreen` timed in CPU cycles |
+| `src/gfx.h` | declaration of the above |
+| `src/rlog.h`, `src/rlog.c`, `src/render.c` | new: the two-core split |
 
 ## The display driver: Apache-2.0
 
