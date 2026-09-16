@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "main.c" "ui.c" "festive.c" "medal.c" "saves.c" "core.c" "music.c"
     INCLUDE_DIRS "."
-    REQUIRES display audio snes9x driver esp_timer esp_partition nvs_flash esp_adc)
+    REQUIRES display audio snes9x ble_pad driver esp_timer esp_partition nvs_flash esp_adc)
 
 # knobs: idf.py -DMEM_LAYOUT=0 -DDEMO_SECONDS=30 build
 foreach(knob MEM_LAYOUT DEMO_SECONDS)
