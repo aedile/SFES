@@ -14,9 +14,10 @@
 #include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "display.h"
+#include "sfes_display.h"
 #include "audio.h"
 #include "snes9x.h"
+#include "rlog.h"
 
 static const char *TAG = "SFES";
 extern uint32_t s9x_render_cycles;
@@ -31,14 +32,13 @@ extern const uint8_t rom_end[]   asm("_binary_rom_sfc_end");
 #define APU_OFF 0     /* bench knob: 1 = no SPC700 emulation (games may hang waiting for it) */
 #endif
 #ifndef FRAMESKIP
-#define FRAMESKIP -1  /* -1 auto (skip the draw after a long frame), else frames skipped between drawn ones */
+#define FRAMESKIP 0   /* frames left out of the render log between logged ones; the render core drops what it cannot keep up with anyway */
 #endif
 #ifndef SOUND
 #define SOUND 0       /* 1 = mix and play through the PCM5101 (paces emulation to the DAC); 0 = silent, run flat out */
 #endif
 #define SAMPLE_RATE   32000
 #define VOLUME_SHIFT  2   /* ponytail: software volume, samples >> this; a real volume setting later */
-#define MAX_AUTO_SKIP 2
 
 /* ---- pad: serial keys held for 120 ms after each keystroke ---- */
 static uint32_t serial_pad(void)
@@ -79,32 +79,6 @@ bool S9xReadSuperScopePosition(int32_t *x, int32_t *y, uint32_t *b) { return fal
 bool JustifierOffscreen(void) { return true; }
 void JustifierButtons(uint32_t *j) {}
 
-/* ---- display push on core 0, straight out of the live framebuffer ----
- * No copy: snes9x renders scanlines top to bottom over the course of a frame (10 ms or more),
- * and the push walks the same rows top to bottom in about 4 ms starting the moment the frame
- * is done, so it stays ahead of the next frame's rendering of every row. If the push has not
- * finished when the next frame completes, that frame is not drawn. */
-static TaskHandle_t push_task_h;
-static volatile int push_busy;
-static uint32_t push_skipped;
-
-static void push_task(void *arg)
-{
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        display_push_rgb565((const uint16_t *)GFX.Screen, GFX.Pitch);
-        push_busy = 0;
-    }
-}
-
-static bool push_frame(void)
-{
-    if (push_busy) { push_skipped++; return false; }
-    push_busy = 1;
-    xTaskNotifyGive(push_task_h);
-    return true;
-}
-
 static void log_heap(const char *when)
 {
     ESP_LOGI(TAG, "heap %s: internal free %u (largest %u), psram free %u", when,
@@ -119,34 +93,37 @@ static void emu_task(void *arg)
     int16_t *pcm = malloc(samples * 4);
     assert(pcm);
     int64_t t_report = esp_timer_get_time(), emu_us = 0, push_us = 0, mix_us = 0, audio_wait_us = 0;
-    int frames = 0, drawn = 0, skip = 0, streak = 0;
-    display_wait_us = 0;
+    int frames = 0;
+    display_wait_us = 0; render_us = 0;
     for (;;) {
-        bool draw = skip == 0;
-        if (FRAMESKIP >= 0) skip = draw ? FRAMESKIP : skip - 1;
-        else skip = 0;
-        IPPU.RenderThisFrame = draw;
+        /* rendering is logged for the render core; FRAMESKIP > 0 leaves frames out of the log */
+        IPPU.RenderThisFrame = FRAMESKIP <= 0 || (frames % (FRAMESKIP + 1)) == 0;
         int64_t t0 = esp_timer_get_time();
         S9xMainLoop();
         int64_t t1 = esp_timer_get_time();
-        if (draw && push_frame()) drawn++;
         int64_t t2 = esp_timer_get_time();
         if (SOUND) { S9xMixSamples(pcm, samples * 2); for (int i = 0; i < samples * 2; i++) pcm[i] >>= VOLUME_SHIFT; }
         int64_t t3 = esp_timer_get_time();
         if (SOUND) audio_write(pcm, samples);
+        else {   /* no DAC to pace us: hold 60 Hz on the timer (sleep the whole ms, spin the rest) */
+            static int64_t next;
+            int64_t now = esp_timer_get_time();
+            if (next == 0 || now - next > 100000) next = now;
+            next += frame_us;
+            if (next - now > 2000) vTaskDelay((next - now - 1000) / 1000);
+            while (esp_timer_get_time() < next) ;
+        }
         int64_t t4 = esp_timer_get_time();
         emu_us += t1 - t0; push_us += t2 - t1; mix_us += t3 - t2; audio_wait_us += t4 - t3; frames++;
-        /* auto frameskip: a frame that overran the budget (before the paced audio wait) drops the next draw */
-        if (FRAMESKIP < 0) {
-            if (t3 - t0 > frame_us && draw && streak < MAX_AUTO_SKIP) { skip = 1; streak++; }
-            else if (draw) streak = 0;
-        }
         if (frames == 300) {   /* fixed frame count, so runs line up on the same moment of the game */
-            float s = (t4 - t_report) / 1e6f;
-            ESP_LOGI(TAG, "%.1f fps emulated, %.1f drawn | per frame: emu %5lld us (render %4lu us), notify %4lld us (core 0 dma wait %4lu us, %lu busy-skips), mix %4lld us, audio wait %4lld us | %s",
-                     frames / s, drawn / s, emu_us / frames, (unsigned long)(s9x_render_cycles / 240 / frames), push_us / (drawn ? drawn : 1), display_wait_us / (drawn ? drawn : 1), push_skipped, mix_us / frames, audio_wait_us / frames,
-                     frames / s >= 59 ? "FULL SPEED" : "slow");
-            t_report = t4; frames = drawn = 0; emu_us = push_us = mix_us = audio_wait_us = 0; display_wait_us = 0; push_skipped = 0; s9x_render_cycles = 0;
+            float sec = (t4 - t_report) / 1e6f;
+            ESP_LOGI(TAG, "%.1f fps emulated, %.1f rendered (%lu dropped, %.1f bands/frame) | emu core: %5lld us/frame, mix %4lld, audio wait %4lld | render core: %5lu us/frame (draw %5lu, dma wait %4lu) | %s",
+                     frames / sec, rlog_frames / sec, rlog_dropped, rlog_frames ? (float)rlog_bands / rlog_frames : 0.f,
+                     emu_us / frames, mix_us / frames, audio_wait_us / frames,
+                     rlog_frames ? render_us / rlog_frames : 0, rlog_frames ? s9x_render_cycles / 240 / rlog_frames : 0, rlog_frames ? display_wait_us / rlog_frames : 0,
+                     frames / sec >= 59 ? "FULL SPEED" : "slow");
+            t_report = t4; frames = 0; emu_us = mix_us = audio_wait_us = 0;
+            rlog_frames = rlog_dropped = rlog_bands = 0; render_us = 0; display_wait_us = 0; s9x_render_cycles = 0;
         }
     }
 }
@@ -198,6 +175,8 @@ void app_main(void)
     log_heap("after init");
     if (SOUND) audio_init(SAMPLE_RATE, SAMPLE_RATE / Memory.ROMFramesPerSecond);
 
-    xTaskCreatePinnedToCore(push_task, "push", 4096, NULL, 4, &push_task_h, 0);
+    rlog_init();
+    render_init();
+    xTaskCreatePinnedToCore(render_task, "render", 12288, NULL, 4, (TaskHandle_t *)&render_task_handle, 0);
     xTaskCreatePinnedToCore(emu_task, "emu", 16384, NULL, 5, NULL, 1);
 }

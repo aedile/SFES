@@ -34,6 +34,8 @@ extern "C" {
 void display_init(void);
 /* Push a native-endian RGB565 frame: GAME_HEIGHT rows of GAME_WIDTH pixels, pitch in bytes. */
 void display_push_rgb565(const uint16_t *fb, int pitch);
+/* One STRIP_ROWS strip starting at frame row y0; returns once it is queued for DMA. */
+void display_push_strip(const uint16_t *fb, int pitch, int y0);
 extern uint32_t display_wait_us;   /* time blocked on the previous strip's DMA (profiling) */
 void display_fill(uint16_t color);
 void display_set_backlight(uint8_t brightness);   /* 0-255 */

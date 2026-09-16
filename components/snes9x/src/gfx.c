@@ -81,6 +81,12 @@ static struct {
 #define LineData LocalState->LineData
 #define LineMatrixData LocalState->LineMatrixData
 
+void S9xSetLineData(const SLineData *ld, const SLineMatrixData *lm)
+{
+   memcpy(LineData, ld, 240 * sizeof(SLineData));
+   memcpy(LineMatrixData, lm, 240 * sizeof(SLineMatrixData));
+}
+
 #define CLIP_10_BIT_SIGNED(a) \
    ((a) & ((1 << 10) - 1)) + (((((a) & (1 << 13)) ^ (1 << 13)) - (1 << 13)) >> 3)
 

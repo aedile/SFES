@@ -240,11 +240,19 @@ extern InternalPPU IPPU;
 void JustifierButtons(uint32_t*);
 bool JustifierOffscreen(void);
 
+/* SFES: rendering runs on the other core from a log of PPU snapshots (rlog.c / render.c).
+ * The emulator side logs a band here; the render side (SFES_RENDER_SIDE) draws it. */
+#ifdef SFES_RENDER_SIDE
 static INLINE void FLUSH_REDRAW(void)
 {
    if (IPPU.PreviousLine != IPPU.CurrentLine)
       S9xUpdateScreen();
 }
+#else
+void rlog_flush(void);
+#define FLUSH_REDRAW() rlog_flush()
+#endif
+extern uint8_t sfes_vram_dirty[4096];   /* one byte per 16-byte VRAM block written since the last hand-off */
 
 static INLINE void REGISTER_2104(uint8_t byte)
 {
@@ -353,9 +361,7 @@ static INLINE void REGISTER_2118(uint8_t Byte)
    }
    else
       Memory.VRAM[address = (PPU.VMA.Address << 1) & 0xFFFF] = Byte;
-   IPPU.TileCached[address >> 4] = false;
-   IPPU.TileCached[address >> 5] = false;
-   IPPU.TileCached[address >> 6] = false;
+   sfes_vram_dirty[address >> 4] = 1;
    if (!PPU.VMA.High)
       PPU.VMA.Address += PPU.VMA.Increment;
 }
@@ -366,9 +372,7 @@ static INLINE void REGISTER_2118_tile(uint8_t Byte)
    uint32_t rem = PPU.VMA.Address & PPU.VMA.Mask1;
    address = (((PPU.VMA.Address & ~PPU.VMA.Mask1) + (rem >> PPU.VMA.Shift) + ((rem & (PPU.VMA.FullGraphicCount - 1)) << 3)) << 1) & 0xffff;
    Memory.VRAM [address] = Byte;
-   IPPU.TileCached[address >> 4] = false;
-   IPPU.TileCached[address >> 5] = false;
-   IPPU.TileCached[address >> 6] = false;
+   sfes_vram_dirty[address >> 4] = 1;
    if (!PPU.VMA.High)
       PPU.VMA.Address += PPU.VMA.Increment;
 }
@@ -377,9 +381,7 @@ static INLINE void REGISTER_2118_linear(uint8_t Byte)
 {
    uint32_t address = (PPU.VMA.Address << 1) & 0xFFFF;
    Memory.VRAM[address] = Byte;
-   IPPU.TileCached[address >> 4] = false;
-   IPPU.TileCached[address >> 5] = false;
-   IPPU.TileCached[address >> 6] = false;
+   sfes_vram_dirty[address >> 4] = 1;
    if (!PPU.VMA.High)
       PPU.VMA.Address += PPU.VMA.Increment;
 }
@@ -395,9 +397,7 @@ static INLINE void REGISTER_2119(uint8_t Byte)
    }
    else
       Memory.VRAM[address = ((PPU.VMA.Address << 1) + 1) & 0xFFFF] = Byte;
-   IPPU.TileCached[address >> 4] = false;
-   IPPU.TileCached[address >> 5] = false;
-   IPPU.TileCached[address >> 6] = false;
+   sfes_vram_dirty[address >> 4] = 1;
    if (PPU.VMA.High)
       PPU.VMA.Address += PPU.VMA.Increment;
 }
@@ -407,9 +407,7 @@ static INLINE void REGISTER_2119_tile(uint8_t Byte)
    uint32_t rem = PPU.VMA.Address & PPU.VMA.Mask1;
    uint32_t address = ((((PPU.VMA.Address & ~PPU.VMA.Mask1) + (rem >> PPU.VMA.Shift) + ((rem & (PPU.VMA.FullGraphicCount - 1)) << 3)) << 1) + 1) & 0xFFFF;
    Memory.VRAM [address] = Byte;
-   IPPU.TileCached[address >> 4] = false;
-   IPPU.TileCached[address >> 5] = false;
-   IPPU.TileCached[address >> 6] = false;
+   sfes_vram_dirty[address >> 4] = 1;
    if (PPU.VMA.High)
       PPU.VMA.Address += PPU.VMA.Increment;
 }
@@ -418,9 +416,7 @@ static INLINE void REGISTER_2119_linear(uint8_t Byte)
 {
    uint32_t address;
    Memory.VRAM[address = ((PPU.VMA.Address << 1) + 1) & 0xFFFF] = Byte;
-   IPPU.TileCached[address >> 4] = false;
-   IPPU.TileCached[address >> 5] = false;
-   IPPU.TileCached[address >> 6] = false;
+   sfes_vram_dirty[address >> 4] = 1;
    if (PPU.VMA.High)
       PPU.VMA.Address += PPU.VMA.Increment;
 }
