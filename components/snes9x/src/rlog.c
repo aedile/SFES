@@ -137,6 +137,11 @@ void rlog_end_frame(void)
             rlog_frames++;
         }
     }
-    if (CPU.SRAMModified)
-        CPU.SRAMModified = false;
+    /* CPU.SRAMModified is left for the app: it flushes battery RAM when it sees it and clears it */
+}
+
+void rlog_reset(void)
+{
+    memset(sfes_vram_dirty, 1, sizeof sfes_vram_dirty);
+    sticky = true;
 }

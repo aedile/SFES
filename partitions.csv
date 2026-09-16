@@ -1,6 +1,7 @@
-# SFES flash layout (16 MB). roms = image packed from roms/ by tools/pack_roms.py.
+# SFES flash layout (16 MB). roms = image packed from roms/ by tools/pack_roms.py; saves = NVS for battery RAM + states.
 # Name,    Type, SubType, Offset,   Size,     Flags
 nvs,       data, nvs,     0x9000,   0x6000,
 phy_init,  data, phy,     0xf000,   0x1000,
 factory,   app,  factory, 0x10000,  0x200000,
-roms,      data, 0x40,    0x210000, 0xDE0000,
+roms,      data, 0x40,    0x210000, 0xAF0000,
+saves,     data, nvs,     0xD00000, 0x300000,

@@ -8,6 +8,9 @@
 #define PIN_I2S_DOUT 47
 
 static i2s_chan_handle_t tx;
+static bool muted;
+void audio_set_mute(bool m) { muted = m; }
+bool audio_muted(void) { return muted; }
 
 void audio_init(int sample_rate, int frames_per_write)
 {
@@ -29,5 +32,7 @@ void audio_init(int sample_rate, int frames_per_write)
 void audio_write(const int16_t *stereo, size_t frames)
 {
     size_t written;
+    static int16_t zeros[1200 * 2];
+    if (muted && frames <= 1200) stereo = zeros;
     i2s_channel_write(tx, stereo, frames * 4, &written, portMAX_DELAY);
 }

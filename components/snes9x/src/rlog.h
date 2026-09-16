@@ -25,6 +25,7 @@ typedef struct {
 
 /* emulator side (cpuexec.c hooks) */
 void rlog_init(void);
+void rlog_reset(void);   /* after a ROM load or state load: resend all of VRAM and the changed flags */
 void rlog_start_frame(void);
 void rlog_render_line(uint8_t line);
 void rlog_flush(void);

@@ -2,6 +2,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,6 +13,8 @@ extern "C" {
 void audio_init(int sample_rate, int frames_per_write);
 /* Blocks while the DMA queue is full, so the caller is paced to the DAC clock. */
 void audio_write(const int16_t *stereo, size_t frames);
+void audio_set_mute(bool mute);   /* silence goes to the DAC; the pacing stays */
+bool audio_muted(void);
 
 #ifdef __cplusplus
 }
