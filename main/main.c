@@ -19,6 +19,7 @@
 #include "snes9x.h"
 
 static const char *TAG = "SFES";
+extern uint32_t s9x_render_cycles;
 
 extern const uint8_t rom_start[] asm("_binary_rom_sfc_start");
 extern const uint8_t rom_end[]   asm("_binary_rom_sfc_end");
@@ -142,10 +143,10 @@ static void emu_task(void *arg)
         }
         if (frames == 300) {   /* fixed frame count, so runs line up on the same moment of the game */
             float s = (t4 - t_report) / 1e6f;
-            ESP_LOGI(TAG, "%.1f fps emulated, %.1f drawn | per frame: emu %5lld us, notify %4lld us (core 0 dma wait %4lu us, %lu busy-skips), mix %4lld us, audio wait %4lld us | %s",
-                     frames / s, drawn / s, emu_us / frames, push_us / (drawn ? drawn : 1), display_wait_us / (drawn ? drawn : 1), push_skipped, mix_us / frames, audio_wait_us / frames,
+            ESP_LOGI(TAG, "%.1f fps emulated, %.1f drawn | per frame: emu %5lld us (render %4lu us), notify %4lld us (core 0 dma wait %4lu us, %lu busy-skips), mix %4lld us, audio wait %4lld us | %s",
+                     frames / s, drawn / s, emu_us / frames, (unsigned long)(s9x_render_cycles / 240 / frames), push_us / (drawn ? drawn : 1), display_wait_us / (drawn ? drawn : 1), push_skipped, mix_us / frames, audio_wait_us / frames,
                      frames / s >= 59 ? "FULL SPEED" : "slow");
-            t_report = t4; frames = drawn = 0; emu_us = push_us = mix_us = audio_wait_us = 0; display_wait_us = 0; push_skipped = 0;
+            t_report = t4; frames = drawn = 0; emu_us = push_us = mix_us = audio_wait_us = 0; display_wait_us = 0; push_skipped = 0; s9x_render_cycles = 0;
         }
     }
 }

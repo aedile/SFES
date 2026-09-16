@@ -2582,7 +2582,18 @@ static void RenderScreen(uint8_t* Screen, bool sub, bool force_no_add, uint8_t D
    }
 }
 
+/* SFES profiling: CPU cycles spent rendering (S9xUpdateScreen) since last cleared */
+#include "esp_cpu.h"
+uint32_t s9x_render_cycles;
+static void S9xUpdateScreenBody(void);
 void S9xUpdateScreen(void)
+{
+   uint32_t c0 = esp_cpu_get_cycle_count();
+   S9xUpdateScreenBody();
+   s9x_render_cycles += esp_cpu_get_cycle_count() - c0;
+}
+
+static void S9xUpdateScreenBody(void)
 {
    int32_t x2 = 1;
    uint32_t starty, endy, black;
