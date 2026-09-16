@@ -56,6 +56,7 @@ static void load_band(const rlog_band_t *b)
     IPPU.TileCache = tc; IPPU.TileCached = tcd; IPPU.ScreenColors = sc; IPPU.DirectColors = dc;
     memcpy(IPPU.ScreenColors, b->colors, sizeof b->colors);
     memcpy(Memory.FillRAM + 0x2100, b->regs, sizeof b->regs);
+    if (PPU.ScreenHeight > SNES_HEIGHT) PPU.ScreenHeight = SNES_HEIGHT;   /* GFX.Screen has 224 rows */
 }
 
 static void render_frame(const rlog_frame_t *f)

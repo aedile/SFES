@@ -3,10 +3,10 @@
  *
  * Boot -> box-art picker -> game (MENU: resume / save / load / reset / mute / picker).
  * A pad idle for 3 minutes -> demo mode: the games' own attract modes, DEMO_SECONDS each.
- * Without a controller the medal's two buttons work everywhere:
+ * Boot -> controller screen -> picker. Without a controller the medal's two buttons work everywhere:
  *   PWR  short: next game            long (2 s): power off
  *   BOOT short: lock/unlock the demo to the current game (kept in NVS)
- *        hold 3 s: mute / unmute
+ *        hold 3 s: mute / unmute        hold 10 s: forget the saved controller
  * Emulation runs on core 1 (this task), rendering on core 0 (render.c); ROMs live in the
  * 'roms' partition, battery RAM and save states in the 'saves' NVS partition.
  */
@@ -22,11 +22,12 @@
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "sfes_display.h"
 #include "audio.h"
 #include "snes9x.h"
 #include "rlog.h"
-#include "pad.h"
+#include "ble_pad.h"
 #include "ui.h"
 #include "festive.h"
 #include "medal.h"
@@ -39,6 +40,7 @@ extern uint32_t s9x_render_cycles;
 
 #define SAMPLE_RATE     32000
 #define VOLUME_SHIFT    2            /* ponytail: software volume, samples >> this */
+#define DEMO_AFTER_US   30000000LL   /* no controller for this long -> demo mode */
 #define IDLE_AFTER_US   180000000LL  /* pad untouched this long -> demo mode */
 #ifndef DEMO_SECONDS
 #define DEMO_SECONDS    120          /* per game in demo mode (idf.py -DDEMO_SECONDS=30) */
@@ -48,7 +50,7 @@ extern uint32_t s9x_render_cycles;
 #define ART_W 134
 #define ART_H 96
 #ifndef MEM_LAYOUT
-#define MEM_LAYOUT 1
+#define MEM_LAYOUT 1   /* 1: framebuffer in internal RAM, depth buffer in PSRAM (BLE needs the rest); 2: both internal; 0: both PSRAM */
 #endif
 
 /* ---- settings in NVS: demo lock, games excluded from the cycle, mute ---- */
@@ -145,7 +147,15 @@ static uint32_t serial_pad(void)
     return m;
 }
 
-static uint32_t pad_now(void) { return serial_pad(); }
+static uint32_t pad_now(void)
+{
+    uint32_t b = ble_pad_buttons(), raw = ble_pad_raw();
+    static uint32_t last_b = 0, last_raw = 0;
+    if (b != last_b || raw != last_raw) { ESP_LOGI(TAG, "PAD raw=%04lx buttons=%04lx", raw, b); last_b = b; last_raw = raw; }
+    b |= serial_pad();
+    if ((b & (PAD_SELECT | PAD_START)) == (PAD_SELECT | PAD_START)) b = (b & ~(PAD_SELECT | PAD_START)) | PAD_MENU;
+    return b;
+}
 
 static void medal_global(void);
 
@@ -175,6 +185,11 @@ static void medal_global(void)
     uint32_t ev = medal_poll() | serial_medal;
     serial_medal = 0;
     if (ev & BTN_BOOT_HOLD3) { set_mute(!muted); toast_mute(); }
+    if (ev & BTN_BOOT_HOLD10) {
+        set_mute(!muted);
+        ble_pad_forget(); ble_pad_scan_any(true);
+        toast("Controller forgotten", "pair one on the controller screen");
+    }
     medal_pending |= ev & (BTN_BOOT_SHORT | BTN_PWR_SHORT);
 }
 
@@ -206,9 +221,10 @@ bool S9xInitDisplay(void)
 {
     GFX.Pitch = SNES_WIDTH * 2;
     GFX.ZPitch = SNES_WIDTH;
-    uint32_t caps = MEM_LAYOUT == 1 ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM;
-    GFX.Screen = heap_caps_malloc(GFX.Pitch * SNES_HEIGHT_EXTENDED, caps);
-    GFX.ZBuffer = heap_caps_malloc(GFX.ZPitch * SNES_HEIGHT_EXTENDED, caps);
+    /* 224 rows (the render side clamps PPU.ScreenHeight so overscan games never write past them)
+     * plus two rows of slack: hi-res modes 5/6 write 512 pixels per row, running one row past the last */
+    GFX.Screen = heap_caps_malloc(GFX.Pitch * (SNES_HEIGHT + 2), MEM_LAYOUT >= 1 ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM);
+    GFX.ZBuffer = heap_caps_malloc(GFX.ZPitch * (SNES_HEIGHT + 2), MEM_LAYOUT >= 2 ? MALLOC_CAP_INTERNAL : MALLOC_CAP_SPIRAM);
     GFX.SubScreen = malloc(GFX.Pitch * SNES_HEIGHT_EXTENDED);
     GFX.SubZBuffer = malloc(GFX.ZPitch * SNES_HEIGHT_EXTENDED);
     return GFX.Screen && GFX.SubScreen && GFX.ZBuffer && GFX.SubZBuffer;
@@ -218,6 +234,16 @@ bool S9xReadMousePosition(int32_t w, int32_t *x, int32_t *y, uint32_t *b) { retu
 bool S9xReadSuperScopePosition(int32_t *x, int32_t *y, uint32_t *b) { return false; }
 bool JustifierOffscreen(void) { return true; }
 void JustifierButtons(uint32_t *j) {}
+
+static void log_heap(const char *when);
+/* a boot-time failure must not reboot in a loop: that re-enumerates USB faster than esptool can connect */
+static void die(const char *what)
+{
+    ESP_LOGE(TAG, "FATAL: %s", what);
+    log_heap("at failure");
+    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+}
+#define MUST(x) do { if (!(x)) die(#x); } while (0)
 
 static void log_heap(const char *when)
 {
@@ -263,6 +289,62 @@ static void toggle_lock(int idx)
     else { demo_set_lock(idx); toast("Demo locked on", name); }
 }
 
+/* ---- controller screen. Returns false if nothing connected for DEMO_AFTER_US (or PWR pressed). ---- */
+static bool controller_screen(bool boot)
+{
+    int64_t deadline = esp_timer_get_time() + ((boot && ble_pad_has_saved()) ? 5000000 : 0);
+    int64_t demo_at = esp_timer_get_time() + DEMO_AFTER_US;
+    bool any = false;
+    int sel = 0, anim = 0;
+    music_start(0);
+    ble_pad_scan_rate(true);
+    pad_edges();
+    for (;;) {
+        ble_pad_state_t st = ble_pad_state();
+        bool connected = st == PAD_CONNECTED;
+        if (!any && !connected && (esp_timer_get_time() > deadline || !ble_pad_has_saved())) { any = true; ble_pad_scan_any(true); }
+        if (connected && any) { any = false; ble_pad_scan_any(false); }
+        uint32_t mev = medal_events();
+        if (mev & BTN_PWR_SHORT) return false;
+        uint32_t e = pad_edges();
+        if (connected || serial_active()) {
+            if (e & PAD_UP) sel = 0;
+            if (e & PAD_DOWN) sel = 1;
+            if ((e & PAD_A) && sel == 1) { ble_pad_forget(); any = true; ble_pad_scan_any(true); sel = 0; toast("Controller forgotten", "pair one now"); }
+            if (((e & PAD_A) && sel == 0) || (e & (PAD_B | PAD_MENU))) return true;
+        }
+        if (boot && connected) return true;
+        if (!connected && !serial_active() && esp_timer_get_time() > demo_at) return false;
+        {
+            int frame = anim++;
+            ui_clear(UI_BLACK);
+            festive_confetti(frame);
+            festive_papel_picado(frame);
+            ui_text_center(30, "CONTROLLER", UI_YELLOW);
+            const char *st_s = "Idle"; uint16_t c = UI_GREY;
+            if (st == PAD_SCANNING) { st_s = "Scanning..."; c = UI_WHITE; }
+            if (st == PAD_CONNECTING) { st_s = "Connecting..."; c = UI_YELLOW; }
+            if (connected) { st_s = "Connected"; c = UI_GREEN; }
+            ui_text(24, 46, "Status:", UI_GREY); ui_text(96, 46, st_s, c);
+            ui_text(24, 58, "Found:", UI_GREY);  ui_text(96, 58, ble_pad_name()[0] ? ble_pad_name() : "-", UI_WHITE);
+            ui_text(24, 70, "Saved:", UI_GREY);  ui_text(96, 70, ble_pad_has_saved() ? "yes" : "no", UI_WHITE);
+            festive_dancers(frame, 140);
+            if (!connected) {
+                ui_text_center(150, "Pairing mode on the pad,", UI_WHITE);
+                ui_text_center(162, "hold it against the medal", UI_WHITE);
+                char d[32]; snprintf(d, sizeof d, "demo mode in %d s", (int)((demo_at - esp_timer_get_time()) / 1000000));
+                ui_text_center(178, d, UI_GREY);
+            } else {
+                ui_text(48, 150, sel == 0 ? ">" : " ", UI_YELLOW); ui_text(64, 150, "Back", sel == 0 ? UI_YELLOW : UI_WHITE);
+                ui_text(48, 164, sel == 1 ? ">" : " ", UI_YELLOW); ui_text(64, 164, "Forget this controller", sel == 1 ? UI_YELLOW : UI_WHITE);
+            }
+            ui_text_center(196, "PWR demo now  hold: power off", UI_GREY);
+            ui_text_center(208, "BOOT 3s mute  10s forget pad", UI_GREY);
+            ui_tick((frame & 1) == 0);
+        }
+    }
+}
+
 /* ---- box-art picker: the selected cover big in the middle, neighbours half size ---- */
 static void draw_cover(int idx, int cx, int cy, int num, int den)
 {
@@ -296,6 +378,8 @@ static int picker(int sel)
         if ((mev & BTN_BOOT_SHORT) && nroms) toggle_lock(sel);
         if (serial_demo) { serial_demo = false; return -1; }
         if (esp_timer_get_time() - last_input > IDLE_AFTER_US) return -1;
+        if (e & PAD_MENU) { if (!controller_screen(false)) return -1; }
+        if (ble_pad_state() != PAD_CONNECTED && !serial_active()) { if (!controller_screen(false)) return -1; }
         {
             int frame = anim++;
             ui_clear(UI_BLACK);
@@ -324,17 +408,17 @@ static int picker(int sel)
             char pos[24]; snprintf(pos, sizeof pos, "%d/%d", sel + 1, nroms);
             ui_text(248 - 8 * strlen(pos), 30, pos, UI_GREY);
             ui_text_center(196, "A play  B demo  SEL mute", UI_GREY);
-            ui_text_center(208, "BOOT lock demo  PWR next", UI_GREY);
+            ui_text_center(208, "SEL+START menu  MENU controller", UI_GREY);
             ui_tick((frame & 1) == 0);   /* 30 fps presents */
         }
     }
 }
 
 /* ---- in-game menu, over the paused frame ---- */
-enum { MENU_RESUME, MENU_SAVE, MENU_LOAD, MENU_RESET, MENU_MUTE, MENU_PICKER, MENU_COUNT };
+enum { MENU_RESUME, MENU_SAVE, MENU_LOAD, MENU_RESET, MENU_MUTE, MENU_PICKER, MENU_CONTROLLER, MENU_COUNT };
 static int game_menu(const char *rom)
 {
-    const char *items[MENU_COUNT] = { "Resume", "Save state", "Load state", "Reset game", muted ? "Unmute" : "Mute", "Return to picker" };
+    const char *items[MENU_COUNT] = { "Resume", "Save state", "Load state", "Reset game", muted ? "Unmute" : "Mute", "Return to picker", "Controller" };
     bool have_state = saves_has_state(rom);
     int sel = 0;
     bool dirty = true;
@@ -450,6 +534,7 @@ static game_result_t run_game(int idx, bool demo)
             if (a == MENU_LOAD) { saves_load_state(rom); rlog_reset(); }
             if (a == MENU_RESET) { S9xReset(); rlog_reset(); }
             if (a == MENU_MUTE) set_mute(!muted);
+            if (a == MENU_CONTROLLER) controller_screen(false);
             if (a == MENU_PICKER) { result = GAME_PICKER; break; }
             prev = pad_now();
             last_input = esp_timer_get_time();
@@ -507,6 +592,7 @@ static void demo_loop(void)
     int first = demo_next(nroms - 1);
     int i = demo_lock >= 0 ? demo_lock : first;
     display_set_backlight(BACKLIGHT_DEMO);
+    ble_pad_scan_rate(false);   /* unattended: the radio listens 3 % of the time */
     for (;;) {
         if (demo_lock < 0 && i == first && cycle_card()) break;
         if (run_game(i, true) == GAME_DEMO_EXIT) break;
@@ -514,6 +600,7 @@ static void demo_loop(void)
         if (demo_lock >= 0) demo_set_lock(i);
     }
     display_set_backlight(BACKLIGHT_PLAY);
+    ble_pad_scan_rate(true);
 }
 
 /* ---- console + BOOT button from a timer: keys reach the pad, and a stuck emulator gets noticed ---- */
@@ -530,7 +617,7 @@ static void app_task(void *arg)
     saves_init();
     log_heap("app start");
     int sel = 0;
-    bool have_pad = true;   /* until the BLE pad arrives, the serial keys are the pad */
+    bool have_pad = controller_screen(true);
     for (;;) {
         if (!have_pad || sel < 0) { demo_loop(); have_pad = true; sel = 0; }
         sel = picker(sel);
@@ -563,18 +650,21 @@ void app_main(void)
     Settings.InterpolatedSound = false;
 
     core_init();
-    assert(S9xInitDisplay());
-    assert(S9xInitMemory());
-    assert(S9xInitAPU());
-    assert(S9xInitSound(0, 0));
-    assert(S9xInitGFX());
+    MUST(S9xInitDisplay());   /* the framebuffer wants the biggest contiguous block: before BLE carves the heap up */
+    ble_pad_init();
+    log_heap("with BLE");
+    MUST(S9xInitMemory());
+    MUST(S9xInitAPU());
+    MUST(S9xInitSound(0, 0));
+    MUST(S9xInitGFX());
     ui_init();
-    audio_init(SAMPLE_RATE, SAMPLE_RATE / 60);
+    audio_init(SAMPLE_RATE, SAMPLE_RATE / 60);   /* four frames of DMA queue: 67 ms of slack, 8.5 KB of internal RAM */
     rlog_init();
     render_init();
     log_heap("before tasks");
-    assert(xTaskCreatePinnedToCore(render_task, "render", 12288, NULL, 4, (TaskHandle_t *)&render_task_handle, 0) == pdPASS);
-    assert(xTaskCreatePinnedToCore(app_task, "app", 16384, NULL, 5, NULL, 1) == pdPASS);
+    /* the render task's stack lives in PSRAM: it never writes flash, and internal RAM is spoken for */
+    MUST(xTaskCreatePinnedToCoreWithCaps(render_task, "render", 12288, NULL, 4, (TaskHandle_t *)&render_task_handle, 0, MALLOC_CAP_SPIRAM) == pdPASS);
+    MUST(xTaskCreatePinnedToCore(app_task, "app", 16384, NULL, 5, NULL, 1) == pdPASS);
     esp_timer_create_args_t w = { .callback = watchdog, .name = "console" };
     esp_timer_handle_t wh;
     ESP_ERROR_CHECK(esp_timer_create(&w, &wh));
