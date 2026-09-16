@@ -1,0 +1,10 @@
+build/
+build_docker/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+.DS_Store
+__pycache__/
+ROMS/
+roms/
