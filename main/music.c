@@ -10,6 +10,7 @@
 
 static const char *TAG = "MUSIC";
 static bool playing, game_live;
+volatile uint32_t music_frames, music_apu_instr;   /* heartbeat counters for the watchdog log */
 static int16_t pcm[(32000 / 60) * 2];
 
 #ifdef HAVE_MENU_SPC
@@ -26,6 +27,7 @@ void music_start(int track)
     if (playing || game_live) return;   /* a game's sound state is in the APU: leave it alone */
     const uint8_t *spc = spc_start;
     if (spc_end - spc < 0x10200 || memcmp(spc, "SNES-SPC700 Sound File Data", 27) != 0) { ESP_LOGE(TAG, "not an SPC"); return; }
+    IAPU.OneCycle = ONE_APU_CYCLE;   /* set by LoadROM for games; zero before any, and S9xResetAPU scales the opcode cycle table by it */
     S9xResetAPU();
     uint8_t iplrom[64];
     memcpy(iplrom, IAPU.RAM + 0xffc0, sizeof iplrom);   /* the boot ROM S9xResetAPU mapped in */
@@ -58,6 +60,9 @@ void music_start(int track)
     IAPU.WaitAddress1 = IAPU.WaitAddress2 = NULL;
     IAPU.WaitCounter = 1;
     APU.Cycles = 0;
+    /* the SPC700 idle-loop shortcut (APUShutdown in spc700.c) sets APU.Cycles = CPU.Cycles when no
+     * main CPU runs, which would spin our per-line loop forever: run the wait loops for real */
+    Settings.Shutdown = false;
     playing = true;
     ESP_LOGI(TAG, "playing \"%.32s\" (%.32s)", spc + 0x2E, spc + 0x4E);
 #else
@@ -70,9 +75,11 @@ void music_start(int track)
 bool music_tick(void)
 {
     if (!playing) return false;
+    music_frames++;
     for (int line = 0; line < 262; line++) {
         CPU.Cycles = Settings.H_Max;
-        APU_EXECUTE();
+        if (IAPU.APUExecuting)
+            while (APU.Cycles <= CPU.Cycles) { APUExecute(); music_apu_instr++; }
         APU.Cycles -= Settings.H_Max;
         if (APU.TimerEnabled[2]) {
             APU.Timer[2] += 4;
@@ -106,6 +113,7 @@ void music_stop(void)
 {
     if (!playing) return;
     playing = false;
+    Settings.Shutdown = true;
     S9xResetAPU();
 }
 
