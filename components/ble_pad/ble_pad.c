@@ -75,7 +75,7 @@ static void hid_parse(const uint8_t *d, size_t len)
                 if (pi == npos && npos < 8) pos[npos++].rid = rid;
                 for (uint32_t k = 0; k < rcount && pi < 8; k++) {
                     uint16_t u = nus ? usages[k < (uint32_t)nus ? k : nus - 1] : 0;
-                    if (!(v & 1) && nfields < 64 && (page == 9 || page == 1 || page == 7))
+                    if (!(v & 1) && nfields < 64 && (page == 9 || page == 1 || page == 7 || page == 2))
                         fields[nfields++] = (hid_field_t){ rid, rsize, pos[pi].bits, page, u, lmin, lmax };
                     pos[pi].bits += rsize;
                 }
@@ -126,6 +126,7 @@ static volatile uint32_t cur_buttons, cur_raw;
 static void decode_report(uint8_t rid, const uint8_t *d, size_t len)
 {
     uint32_t raw = 0, dir = 0;
+    int stick_x = 0, stick_y = 0;
     for (int f = 0; f < nfields; f++) {
         const hid_field_t *h = &fields[f];
         if (h->rid != rid) continue;
@@ -146,13 +147,32 @@ static void decode_report(uint8_t rid, const uint8_t *d, size_t len)
                 }
                 break;
             }
-            case 0x30: if (range > 0) { if (sv - h->lmin < range / 4) dir |= PAD_LEFT; else if (sv - h->lmin > range * 3 / 4) dir |= PAD_RIGHT; } break;
-            case 0x31: if (range > 0) { if (sv - h->lmin < range / 4) dir |= PAD_UP;   else if (sv - h->lmin > range * 3 / 4) dir |= PAD_DOWN; } break;
+            case 0x30: if (range > 0) stick_x = (sv - h->lmin) * 200 / range - 100; break;   /* left stick, -100..100 */
+            case 0x31: if (range > 0) stick_y = (sv - h->lmin) * 200 / range - 100; break;
             case 0x90: if (v) dir |= PAD_UP; break;     /* DPad usages, some pads */
             case 0x91: if (v) dir |= PAD_DOWN; break;
             case 0x92: if (v) dir |= PAD_RIGHT; break;
             case 0x93: if (v) dir |= PAD_LEFT; break;
             }
+        } else if (h->page == 2) {         /* simulation controls: the Xbox triggers, 10-bit, 0 at rest */
+            int32_t range = h->lmax - h->lmin;
+            if (range > 0 && (int32_t)v - h->lmin > range / 4) {
+                if (h->usage == 0xC5) dir |= PAD_L;   /* brake = left trigger */
+                if (h->usage == 0xC4) dir |= PAD_R;   /* accelerator = right trigger */
+            }
+        }
+    }
+    /* ponytail: the left stick is not a direction. This pad reports large stick deflections with
+     * nobody touching it (up to 85 % off centre at connect), which held UP and DOWN against the
+     * d-pad. The values are logged below; a calibrated stick can come back once that is understood. */
+    (void)stick_x; (void)stick_y;
+    {   /* raw report on every change, while the mapping is being worked out */
+        static uint32_t last_raw, last_dir;
+        if (raw != last_raw || dir != last_dir) {
+            char hex[64]; int n = 0;
+            for (size_t i = 0; i < len && i < 20; i++) n += snprintf(hex + n, sizeof hex - n, "%02x", d[i]);
+            ESP_LOGI(TAG, "report rid %u: %s -> raw %04lx dir %04lx stick %d,%d", rid, hex, (unsigned long)raw, (unsigned long)dir, stick_x, stick_y);
+            last_raw = raw; last_dir = dir;
         }
     }
     /* keyboard-mode pads (8BitDo Micro / Zero 2 in K mode) send HID keycodes in 8-bit array
