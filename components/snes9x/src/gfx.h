@@ -196,4 +196,5 @@ GFX.ZERO [(((C1) | RGB_HI_BITS_MASKx2) - \
 typedef void (*NormalTileRenderer)(uint32_t Tile, int32_t Offset, uint32_t StartLine, uint32_t LineCount);
 typedef void (*ClippedTileRenderer)(uint32_t Tile, int32_t Offset, uint32_t StartPixel, uint32_t Width, uint32_t StartLine, uint32_t LineCount);
 typedef void (*LargePixelRenderer)(uint32_t Tile, int32_t Offset, uint32_t StartPixel, uint32_t Pixels, uint32_t StartLine, uint32_t LineCount);
+void S9xSetLineData(const SLineData *ld, const SLineMatrixData *lm);   /* SFES: render side loads the logged per-line data */
 #endif

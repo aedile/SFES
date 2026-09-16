@@ -1,6 +1,7 @@
 /* This file is part of Snes9x. See LICENSE file. */
 
 #include "snes9x.h"
+#include "rlog.h"
 #include "memmap.h"
 #include "cpuops.h"
 #include "ppu.h"
@@ -134,7 +135,7 @@ void S9xDoHBlankProcessing()
       if (CPU.V_Counter == PPU.ScreenHeight + FIRST_VISIBLE_LINE)
       {
          /* Start of V-blank */
-         S9xEndScreenRefresh();
+         rlog_end_frame();
          IPPU.HDMA = 0;
          /* Bits 7 and 6 of $4212 are computed when read in S9xGetPPU. */
          PPU.ForcedBlanking = (Memory.FillRAM [0x2100] >> 7) & 1;
@@ -171,10 +172,10 @@ void S9xDoHBlankProcessing()
       {
          Memory.FillRAM[0x4210] = SNES_5A22;
          CPU.Flags &= ~NMI_FLAG;
-         S9xStartScreenRefresh();
+         rlog_start_frame();
       }
       if (CPU.V_Counter >= FIRST_VISIBLE_LINE && CPU.V_Counter < PPU.ScreenHeight + FIRST_VISIBLE_LINE)
-         RenderLine(CPU.V_Counter - FIRST_VISIBLE_LINE);
+         rlog_render_line(CPU.V_Counter - FIRST_VISIBLE_LINE);
 #ifndef USE_BLARGG_APU
       if (APU.TimerEnabled [2])
       {

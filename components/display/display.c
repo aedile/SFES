@@ -1,5 +1,5 @@
 /* display.c - ST77916 over QSPI via esp_lcd; panel reset lives on a TCA9554 I/O expander. */
-#include "display.h"
+#include "sfes_display.h"
 #include <string.h>
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -103,26 +103,30 @@ void display_init(void)
 
 /* draw_bitmap queues the strip and returns; the next call waits for it, so convert the following
  * strip into the other buffer meanwhile. */
-IRAM_ATTR void display_push_rgb565(const uint16_t *fb, int pitch)
+IRAM_ATTR void display_push_strip(const uint16_t *fb, int pitch, int y0)
 {
-    for (int y0 = 0; y0 < GAME_HEIGHT; y0 += STRIP_ROWS) {
-        uint32_t *dst = (uint32_t *)strip[cur];
-        for (int r = 0; r < STRIP_ROWS; r++) {
-            const uint32_t *src = (const uint32_t *)((const uint8_t *)fb + (y0 + r) * pitch);
-            for (int x = 0; x < GAME_WIDTH / 2; x += 4) {
-                uint32_t a = src[x], b = src[x + 1], c = src[x + 2], d = src[x + 3];
-                dst[0] = ((a & 0xFF00FF00u) >> 8) | ((a & 0x00FF00FFu) << 8);
-                dst[1] = ((b & 0xFF00FF00u) >> 8) | ((b & 0x00FF00FFu) << 8);
-                dst[2] = ((c & 0xFF00FF00u) >> 8) | ((c & 0x00FF00FFu) << 8);
-                dst[3] = ((d & 0xFF00FF00u) >> 8) | ((d & 0x00FF00FFu) << 8);
-                dst += 4;
-            }
+    uint32_t *dst = (uint32_t *)strip[cur];
+    for (int r = 0; r < STRIP_ROWS; r++) {
+        const uint32_t *src = (const uint32_t *)((const uint8_t *)fb + (y0 + r) * pitch);
+        for (int x = 0; x < GAME_WIDTH / 2; x += 4) {
+            uint32_t a = src[x], b = src[x + 1], c = src[x + 2], d = src[x + 3];
+            dst[0] = ((a & 0xFF00FF00u) >> 8) | ((a & 0x00FF00FFu) << 8);
+            dst[1] = ((b & 0xFF00FF00u) >> 8) | ((b & 0x00FF00FFu) << 8);
+            dst[2] = ((c & 0xFF00FF00u) >> 8) | ((c & 0x00FF00FFu) << 8);
+            dst[3] = ((d & 0xFF00FF00u) >> 8) | ((d & 0x00FF00FFu) << 8);
+            dst += 4;
         }
-        int64_t w0 = esp_timer_get_time();
-        esp_lcd_panel_draw_bitmap(panel, GAME_X, GAME_Y + y0, GAME_X + GAME_WIDTH, GAME_Y + y0 + STRIP_ROWS, strip[cur]);
-        display_wait_us += esp_timer_get_time() - w0;
-        cur ^= 1;
     }
+    int64_t w0 = esp_timer_get_time();
+    esp_lcd_panel_draw_bitmap(panel, GAME_X, GAME_Y + y0, GAME_X + GAME_WIDTH, GAME_Y + y0 + STRIP_ROWS, strip[cur]);
+    display_wait_us += esp_timer_get_time() - w0;
+    cur ^= 1;
+}
+
+void display_push_rgb565(const uint16_t *fb, int pitch)
+{
+    for (int y0 = 0; y0 < GAME_HEIGHT; y0 += STRIP_ROWS)
+        display_push_strip(fb, pitch, y0);
 }
 
 void display_fill(uint16_t color)
