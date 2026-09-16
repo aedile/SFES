@@ -38,6 +38,9 @@
 
 static const char *TAG = "SFES";
 extern uint32_t s9x_render_cycles;
+static volatile uint32_t frames_total;          /* heartbeat counters, logged by the watchdog timer */
+static volatile const char *phase = "boot";
+extern volatile uint32_t music_frames, music_apu_instr;
 
 #define SAMPLE_RATE     32000
 #define DEMO_AFTER_US   30000000LL   /* no controller for this long -> demo mode */
@@ -559,7 +562,7 @@ static game_result_t run_game(int idx, bool demo)
         int64_t e0 = esp_timer_get_time();
         emulate_frame(pcm, samples);
         int64_t e1 = esp_timer_get_time();
-        emu_us += e1 - e0; frames++;
+        emu_us += e1 - e0; frames++; frames_total++;
         if (!demo) sram_flush(rom, false);
         if (frames == 300) {
             float sec = (e1 - t_report) / 1e6f;
@@ -619,11 +622,14 @@ static void demo_loop(void)
 }
 
 /* ---- console + BOOT button from a timer: keys reach the pad, and a stuck emulator gets noticed ---- */
-static volatile uint32_t frames_total;
 static void watchdog(void *arg)
 {
+    static int ticks;
     uint8_t c;
     while (usb_serial_jtag_read_bytes(&c, 1, 0) == 1) serial_push(c);
+    if (++ticks % 600 == 0)   /* every 30 s: proof of life from the timer task */
+        ESP_LOGI(TAG, "alive: phase %s, game frames %lu, music frames %lu, apu instr %lu, apu cycles %ld, executing %d",
+                 phase, frames_total, music_frames, music_apu_instr, (long)APU.Cycles, IAPU.APUExecuting);
 }
 
 static void app_task(void *arg)
@@ -631,14 +637,19 @@ static void app_task(void *arg)
     settings_load();
     saves_init();
     log_heap("app start");
+    phase = "music start";
     music_start(0);
+    phase = "splash";
     splash_run();
     int sel = 0;
+    phase = "controller";
     bool have_pad = controller_screen(true);
     for (;;) {
-        if (!have_pad || sel < 0) { demo_loop(); have_pad = true; sel = 0; }
+        if (!have_pad || sel < 0) { phase = "demo"; demo_loop(); have_pad = true; sel = 0; }
+        phase = "picker";
         sel = picker(sel);
         if (sel < 0) continue;
+        phase = "game";
         game_result_t r = run_game(sel, false);
         if (r == GAME_IDLE) sel = -1;
     }
