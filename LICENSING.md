@@ -5,10 +5,11 @@ owns it, and what you may do with it. Nothing here is legal advice.
 
 ## The code written for this project: MIT
 
-Everything under `main/`, `components/audio`, `tools/`,
-`components/display/display.c`, `components/display/display.h` and the build
-files is Copyright (c) 2026 Jesse Castro and released under the MIT license
-(`LICENSE`).
+Everything under `main/`, `components/audio`, `components/ble_pad`, `tools/`,
+`components/display/display.c`, `components/display/sfes_display.h` and the
+build files is Copyright (c) 2026 Jesse Castro and released under the MIT
+license (`LICENSE`). `components/esp_hid` is ESP-IDF's HID host component
+(Apache-2.0), vendored via NESTOR with NimBLE fixes.
 
 ## The SNES core: Snes9x 2005
 
@@ -29,6 +30,7 @@ Modifications for this port (September 2026):
 | `src/gfx.c` | `S9xSetLineData` (render side loads the logged per-line data); `S9xUpdateScreen` timed in CPU cycles |
 | `src/gfx.h` | declaration of the above |
 | `src/rlog.h`, `src/rlog.c`, `src/render.c` | new: the two-core split |
+| `src/snapshot.c`, `src/snapshot.h` | `S9xSaveStateFile` / `S9xLoadStateFile` take an open `FILE *` (states go to NVS) |
 
 ## The display driver: Apache-2.0
 

@@ -34,12 +34,12 @@
 #include "saves.h"
 #include "core.h"
 #include "music.h"
+#include "splash.h"
 
 static const char *TAG = "SFES";
 extern uint32_t s9x_render_cycles;
 
 #define SAMPLE_RATE     32000
-#define VOLUME_SHIFT    2            /* ponytail: software volume, samples >> this */
 #define DEMO_AFTER_US   30000000LL   /* no controller for this long -> demo mode */
 #define IDLE_AFTER_US   180000000LL  /* pad untouched this long -> demo mode */
 #ifndef DEMO_SECONDS
@@ -199,6 +199,18 @@ static uint32_t medal_events(void)
     uint32_t ev = medal_pending;
     medal_pending = 0;
     return ev;
+}
+
+bool splash_skip_requested(void) { return pad_edges() || (medal_events() & (BTN_BOOT_SHORT | BTN_PWR_SHORT)); }
+
+const uint8_t *splash_cover(const char *sn, int *w, int *h)
+{
+    for (int i = 0; i < nroms; i++) {
+        char n[29]; short_name(roms[i].name, n, sizeof n);
+        if (strcmp(n, sn) == 0) return core_art(i, w, h);
+    }
+    *w = ART_W; *h = ART_H;
+    return NULL;
 }
 
 /* the SNES pad as the core sees it */
@@ -467,7 +479,7 @@ static void emulate_frame(int16_t *pcm, int samples)
     IPPU.RenderThisFrame = true;
     S9xMainLoop();
     S9xMixSamples(pcm, samples * 2);
-    for (int i = 0; i < samples * 2; i++) pcm[i] >>= VOLUME_SHIFT;
+    for (int i = 0; i < samples * 2; i++) pcm[i] >>= AUDIO_VOLUME_SHIFT;
     audio_write(pcm, samples);   /* blocks on the DAC queue: this is the 60 Hz pacing */
 }
 
@@ -491,7 +503,9 @@ static game_result_t run_game(int idx, bool demo)
             if (pad_edges()) return GAME_DEMO_EXIT;
         }
     }
+    music_game_live(true);
     if (!core_load(idx)) {
+        music_game_live(false);
         ui_clear(UI_BLACK); ui_text_center(108, "Unsupported ROM", UI_RED); ui_present();
         vTaskDelay(pdMS_TO_TICKS(1500));
         return demo ? GAME_DEMO_NEXT : GAME_PICKER;
@@ -558,6 +572,7 @@ static game_result_t run_game(int idx, bool demo)
     if (!demo) sram_flush(rom, true);
     while (render_busy) vTaskDelay(1);
     free(pcm);
+    music_game_live(false);
     return result;
 }
 
@@ -616,6 +631,8 @@ static void app_task(void *arg)
     settings_load();
     saves_init();
     log_heap("app start");
+    music_start(0);
+    splash_run();
     int sel = 0;
     bool have_pad = controller_screen(true);
     for (;;) {
