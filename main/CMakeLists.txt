@@ -1,7 +1,13 @@
 idf_component_register(
-    SRCS "main.c" "ui.c" "festive.c" "medal.c" "saves.c" "core.c" "music.c"
+    SRCS "main.c" "ui.c" "festive.c" "medal.c" "saves.c" "core.c" "music.c" "splash.c"
     INCLUDE_DIRS "."
     REQUIRES display audio snes9x ble_pad driver esp_timer esp_partition nvs_flash esp_adc)
+
+# Menu music: roms/music/menu.spc (tools/fetch_music.py) is embedded if present.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../roms/music/menu.spc")
+    target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../roms/music/menu.spc" BINARY)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE HAVE_MENU_SPC=1)
+endif()
 
 # knobs: idf.py -DMEM_LAYOUT=0 -DDEMO_SECONDS=30 build
 foreach(knob MEM_LAYOUT DEMO_SECONDS)
