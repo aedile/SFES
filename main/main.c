@@ -78,6 +78,32 @@ bool S9xReadSuperScopePosition(int32_t *x, int32_t *y, uint32_t *b) { return fal
 bool JustifierOffscreen(void) { return true; }
 void JustifierButtons(uint32_t *j) {}
 
+/* ---- display push on core 0, straight out of the live framebuffer ----
+ * No copy: snes9x renders scanlines top to bottom over the course of a frame (10 ms or more),
+ * and the push walks the same rows top to bottom in about 4 ms starting the moment the frame
+ * is done, so it stays ahead of the next frame's rendering of every row. If the push has not
+ * finished when the next frame completes, that frame is not drawn. */
+static TaskHandle_t push_task_h;
+static volatile int push_busy;
+static uint32_t push_skipped;
+
+static void push_task(void *arg)
+{
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        display_push_rgb565((const uint16_t *)GFX.Screen, GFX.Pitch);
+        push_busy = 0;
+    }
+}
+
+static bool push_frame(void)
+{
+    if (push_busy) { push_skipped++; return false; }
+    push_busy = 1;
+    xTaskNotifyGive(push_task_h);
+    return true;
+}
+
 static void log_heap(const char *when)
 {
     ESP_LOGI(TAG, "heap %s: internal free %u (largest %u), psram free %u", when,
@@ -102,7 +128,7 @@ static void emu_task(void *arg)
         int64_t t0 = esp_timer_get_time();
         S9xMainLoop();
         int64_t t1 = esp_timer_get_time();
-        if (draw) { display_push_rgb565((const uint16_t *)GFX.Screen, GFX.Pitch); drawn++; }
+        if (draw && push_frame()) drawn++;
         int64_t t2 = esp_timer_get_time();
         if (SOUND) { S9xMixSamples(pcm, samples * 2); for (int i = 0; i < samples * 2; i++) pcm[i] >>= VOLUME_SHIFT; }
         int64_t t3 = esp_timer_get_time();
@@ -116,10 +142,10 @@ static void emu_task(void *arg)
         }
         if (frames == 300) {   /* fixed frame count, so runs line up on the same moment of the game */
             float s = (t4 - t_report) / 1e6f;
-            ESP_LOGI(TAG, "%.1f fps emulated, %.1f drawn | per frame: emu %5lld us, push %4lld us (dma wait %4lu us), mix %4lld us, audio wait %4lld us | %s",
-                     frames / s, drawn / s, emu_us / frames, push_us / drawn, display_wait_us / drawn, mix_us / frames, audio_wait_us / frames,
+            ESP_LOGI(TAG, "%.1f fps emulated, %.1f drawn | per frame: emu %5lld us, notify %4lld us (core 0 dma wait %4lu us, %lu busy-skips), mix %4lld us, audio wait %4lld us | %s",
+                     frames / s, drawn / s, emu_us / frames, push_us / (drawn ? drawn : 1), display_wait_us / (drawn ? drawn : 1), push_skipped, mix_us / frames, audio_wait_us / frames,
                      frames / s >= 59 ? "FULL SPEED" : "slow");
-            t_report = t4; frames = drawn = 0; emu_us = push_us = mix_us = audio_wait_us = 0; display_wait_us = 0;
+            t_report = t4; frames = drawn = 0; emu_us = push_us = mix_us = audio_wait_us = 0; display_wait_us = 0; push_skipped = 0;
         }
     }
 }
@@ -171,5 +197,6 @@ void app_main(void)
     log_heap("after init");
     if (SOUND) audio_init(SAMPLE_RATE, SAMPLE_RATE / Memory.ROMFramesPerSecond);
 
+    xTaskCreatePinnedToCore(push_task, "push", 4096, NULL, 4, &push_task_h, 0);
     xTaskCreatePinnedToCore(emu_task, "emu", 16384, NULL, 5, NULL, 1);
 }
