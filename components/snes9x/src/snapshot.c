@@ -13,13 +13,19 @@
 static const char header[16] = "SNES9X_000000002";
 
 
+bool S9xSaveStateFile(FILE *fp);
 bool S9xSaveState(const char *filename)
 {
-   int chunks = 0;
-   FILE *fp = NULL;
+   FILE *fp = fopen(filename, "wb");
+   if (!fp) return false;
+   bool ok = S9xSaveStateFile(fp);
+   fclose(fp);
+   return ok;
+}
 
-   if (!(fp = fopen(filename, "wb")))
-      return false;
+bool S9xSaveStateFile(FILE *fp)   /* SFES: caller owns fp (a memory stream for NVS) */
+{
+   int chunks = 0;
 
    chunks += fwrite(&header, sizeof(header), 1, fp);
    chunks += fwrite(&CPU, sizeof(CPU), 1, fp);
@@ -37,19 +43,23 @@ bool S9xSaveState(const char *filename)
 
    printf("Saved chunks = %d\n", chunks);
 
-   fclose(fp);
-
    return chunks == 13;
 }
 
+bool S9xLoadStateFile(FILE *fp);
 bool S9xLoadState(const char *filename)
+{
+   FILE *fp = fopen(filename, "rb");
+   if (!fp) return false;
+   bool ok = S9xLoadStateFile(fp);
+   fclose(fp);
+   return ok;
+}
+
+bool S9xLoadStateFile(FILE *fp)   /* SFES: caller owns fp */
 {
    uint8_t buffer[512];
    int chunks = 0;
-   FILE *fp = NULL;
-
-   if (!(fp = fopen(filename, "rb")))
-      return false;
 
    if (!fread(buffer, 16, 1, fp) || memcmp(header, buffer, sizeof(header)) != 0)
    {
@@ -99,10 +109,8 @@ bool S9xLoadState(const char *filename)
    S9xFixCycles();
    S9xReschedule();
 
-   fclose(fp);
    return true;
 
 fail:
-   fclose(fp);
    return false;
 }
